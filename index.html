@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalkulator Zakat Mal (Client‑Side)</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- SheetJS untuk baca Excel -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Kalkulator Zakat Mal</h1>
+        <p class="warning">🔒 Semua file diproses di browser Anda. Tidak ada data yang dikirim ke server.</p>
+
+        <form id="zakatForm">
+            <div class="form-group">
+                <label for="files">Unggah file e‑statement (CSV, Excel, PDF):</label>
+                <input type="file" id="files" name="files" multiple accept=".csv,.xls,.xlsx,.pdf" required>
+                <small>File PDF yang dilindungi password akan dimintai password nanti.</small>
+            </div>
+
+            <div id="fileList" class="file-list"></div>
+
+            <div class="form-group">
+                <label for="start_date">Tanggal Mulai (1 Ramadhan tahun lalu):</label>
+                <input type="date" id="start_date" name="start_date" required>
+            </div>
+            <div class="form-group">
+                <label for="end_date">Tanggal Akhir (1 Ramadhan tahun ini):</label>
+                <input type="date" id="end_date" name="end_date" required>
+            </div>
+            <div class="form-group">
+                <label for="gold_price">Harga Emas per Gram (Rp):</label>
+                <input type="number" id="gold_price" name="gold_price" step="1000" required>
+                <small>Nisab = 85 gram emas</small>
+            </div>
+
+            <button type="button" id="calculateBtn">Hitung Zakat</button>
+        </form>
+
+        <div id="passwordModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h3>Masukkan Password untuk Bank <span id="bankName"></span></h3>
+                <p>File: <span id="fileNames"></span></p>
+                <input type="password" id="bankPassword" placeholder="Password">
+                <button id="submitPassword">OK</button>
+                <button id="cancelPassword">Batal</button>
+            </div>
+        </div>
+
+        <div id="result" class="result" style="display: none;">
+            <h2>Hasil Perhitungan</h2>
+            <p><strong>Total saldo terendah selama periode:</strong> Rp <span id="min_balance"></span></p>
+            <p><strong>Nisab (85 gram emas):</strong> Rp <span id="nisab"></span></p>
+            <p><strong>Status:</strong> <span id="status"></span></p>
+            <p><strong>Zakat yang harus dibayar:</strong> Rp <span id="zakat"></span></p>
+        </div>
+        <div id="error" class="error" style="display: none;"></div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
