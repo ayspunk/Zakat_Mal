@@ -163,7 +163,7 @@ async function readPDF(file) {
     return allLines;
 }
 
-// ====================== PARSER DANAMON PDF (IDR ONLY) ======================
+// ====================== PARSER DANAMON PDF (IDR + USD → 2 rekening terpisah) ======================
 function parseDanamonPDF(lines) {
     const BULAN_ID = {
         'Januari':1,'Februari':2,'Maret':3,'April':4,'Mei':5,'Juni':6,
@@ -182,122 +182,137 @@ function parseDanamonPDF(lines) {
     }
     if (!periodYear || !periodMonth) throw new Error('Periode tidak ditemukan dalam PDF Danamon.');
 
-    // Regex untuk angka format Indonesia: 1.234.567,89
     const RE_IDR_NUM = /\d+(?:\.\d{3})*,\d{2}/g;
 
-    // ── STRATEGI PARSING ──────────────────────────────────────────────────────
-    // PDF.js menggabungkan teks dari dua kolom ke satu baris berdasarkan Y-coord.
-    // Akibatnya baris "SALDO BULAN LALU 5.273.019,72" bisa tergabung dengan
-    // angka dari tabel ringkasan di kolom sebelah (misal "192.466.019,37").
-    // Solusi: gunakan dua penanda yang BERBEDA antara tabel ringkasan vs RINCIAN:
-    //   • Tabel ringkasan  → "DANAMON LEBIH PRO (IDR) 903... IDR  5.263.377,65"  (tanpa dash)
-    //   • Header RINCIAN   → "DANAMON LEBIH PRO (IDR) - IDR - 903..."            (ada dash)
-    // Hanya format DENGAN DASH yang menandai masuk ke section transaksi.
-    // ─────────────────────────────────────────────────────────────────────────
-
-    let inRincian = false, inIDRSection = false;
-    let saldoAwal = null;
-    const transactions = [];
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        // Masuk ke bagian rincian transaksi per rekening
-        if (/RINCIAN TRANSAKSI PER REKENING/i.test(line)) {
-            inRincian = true;
-            continue;
+    // ── Ekstrak kurs implisit dari tabel ringkasan ─────────────────────────────
+    // Prioritaskan DANAMON LEBIH PRO (USD) row karena saldo lebih besar & akurat.
+    // Fallback ke PRIMADOLLAR jika USD-0747 = 0.
+    let kursImplisit = null;
+    let accountIdUSD = null;  // accountId PRIMADOLLAR
+    for (const line of lines) {
+        // Selalu catat accountId PRIMADOLLAR
+        if (/PRIMADOLLAR/i.test(line) && !accountIdUSD) {
+            const m = line.match(/(\d{10,12})/);
+            if (m) accountIdUSD = m[1];
         }
-        if (!inRincian) continue;
-
-        // Header RINCIAN IDR → format dengan dash: "DANAMON LEBIH PRO (IDR) - IDR - 9036..."
-        // BUKAN baris ringkasan tanpa dash
-        if (/DANAMON LEBIH PRO \(IDR\)\s*-\s*IDR\s*-/i.test(line)) {
-            inIDRSection = true;
-            continue;
-        }
-
-        // Hentikan saat masuk rekening berikutnya (format RINCIAN juga pakai dash)
-        if (inIDRSection && (
-            /PRIMADOLLAR[^(]*-\s*USD\s*-/i.test(line) ||
-            /DANAMON LEBIH PRO \((?!IDR)/i.test(line) ||
-            /^TOTAL\s+[\d.,]+/.test(line.trim()) ||   // baris TOTAL penutup tabel
-            /D-POINT BANKING|AKHIR LAPORAN/i.test(line)
-        )) {
-            break;
-        }
-        if (!inIDRSection) continue;
-
-        // Baris "SALDO BULAN LALU" → ambil angka PERTAMA yang ditemukan (bukan terakhir)
-        // agar tidak terpengaruh angka dari kolom ringkasan yang tergabung oleh PDF.js
-        if (/SALDO BULAN LALU/i.test(line)) {
-            const nums = [...line.matchAll(RE_IDR_NUM)].map(m => m[0]);
-            if (nums.length) {
-                // Ambil angka terkecil yang masuk akal (> 0) sebagai saldo rekening IDR,
-                // bukan angka total gabungan yang bisa saja tergabung di baris yang sama
-                const parsed = nums.map(n => parseNumber(n)).filter(n => !isNaN(n) && n > 0);
-                saldoAwal = parsed.length ? Math.min(...parsed) : null;
-                console.log(`Danamon saldo awal: ${saldoAwal} (dari angka: ${nums.join(', ')})`);
+        // Ambil kurs dari baris DANAMON LEBIH PRO (USD) atau PRIMADOLLAR
+        if (kursImplisit) continue;
+        if (!/DANAMON LEBIH PRO \(USD\)|PRIMADOLLAR/i.test(line)) continue;
+        const idrs = [...line.matchAll(RE_IDR_NUM)].map(m => parseNumber(m[0]));
+        if (idrs.length >= 2) {
+            const usdSaldo = idrs[idrs.length - 2];
+            const idrSaldo = idrs[idrs.length - 1];
+            if (usdSaldo > 0 && idrSaldo > 0) {
+                kursImplisit = idrSaldo / usdSaldo;
+                console.log(`Danamon kurs implisit: ${idrSaldo} / ${usdSaldo} = ${kursImplisit.toFixed(2)}`);
             }
-            continue;
         }
+    }
+    if (!kursImplisit) {
+        console.warn('Kurs implisit tidak ditemukan, fallback ke 16.000');
+        kursImplisit = 16000;
+    }
 
-        // Baris transaksi: dimulai dengan DD/MM DD/MM
-        const txMatch = line.match(/^(\d{2})\/(\d{2})\s+(\d{2})\/(\d{2})\s/);
-        if (txMatch) {
-            // Gunakan TGL VALUTA (kolom ke-2) sebagai tanggal efektif
-            const day   = parseInt(txMatch[3]);
-            const month = parseInt(txMatch[4]);
+    // ── Helper ────────────────────────────────────────────────────────────────
+    function stripRefNumbers(line) { return line.replace(/\d{13,}/g, ''); }
+
+    function parseSection(headerRegex, stopRegex, isUSD) {
+        let inRincian = false, inSection = false;
+        let saldoAwal = null;
+        const txList = [];
+        for (const line of lines) {
+            if (/RINCIAN TRANSAKSI PER REKENING/i.test(line)) { inRincian = true; continue; }
+            if (!inRincian) continue;
+            if (headerRegex.test(line)) { inSection = true; continue; }
+            if (inSection && stopRegex.test(line)) break;
+            if (!inSection) continue;
+            const cleanLine = stripRefNumbers(line);
+            if (/SALDO BULAN LALU/i.test(cleanLine)) {
+                const vals = [...cleanLine.matchAll(RE_IDR_NUM)].map(m => parseNumber(m[0])).filter(n => n >= 0);
+                saldoAwal = vals.length ? Math.min(...vals) : null;
+                console.log(`Danamon saldo awal ${isUSD?'USD':'IDR'}:`, saldoAwal);
+                continue;
+            }
+            const txMatch = line.match(/^(\d{2})\/(\d{2})\s+(\d{2})\/(\d{2})\s/);
+            if (!txMatch) continue;
+            const day = parseInt(txMatch[3]), month = parseInt(txMatch[4]);
             let year = periodYear;
-            // Tangani batas tahun: valuta Desember di statement Januari
             if (month === 12 && periodMonth === 1) year--;
             const date = new Date(year, month - 1, day);
-
-            const nums = [...line.matchAll(RE_IDR_NUM)].map(m => m[0]);
-            if (nums.length) {
-                // Saldo selalu di kolom terakhir; tapi jika ikut tergabung dengan
-                // kolom ringkasan, ambil yang terkecil (saldo IDR, bukan total gabungan)
-                const parsed = nums.map(n => parseNumber(n)).filter(n => !isNaN(n) && n >= 0);
-                if (parsed.length) {
-                    // Heuristik: jika ada lebih dari 3 angka (kemungkinan kolom tergabung),
-                    // ambil angka yang masuk akal sbg saldo IDR (< 50 jt untuk rekening ini)
-                    let balance;
-                    if (parsed.length <= 3) {
-                        balance = parsed[parsed.length - 1]; // kolom SALDO = terakhir
-                    } else {
-                        // Ambil angka terakhir yang < 50 jt (threshold aman untuk IDR account)
-                        const IDR_THRESHOLD = 50_000_000;
-                        const candidates = parsed.filter(n => n < IDR_THRESHOLD);
-                        balance = candidates.length
-                            ? candidates[candidates.length - 1]
-                            : parsed[parsed.length - 1];
-                    }
-                    transactions.push({ date, balance });
-                    console.log(`Danamon tx: ${toLocalDateStr(date)} saldo=${balance}`);
-                }
-            }
+            const vals = [...cleanLine.matchAll(RE_IDR_NUM)].map(m => parseNumber(m[0])).filter(n => n >= 0);
+            if (!vals.length) continue;
+            const threshold = isUSD ? 1_000_000 : 500_000_000;
+            const balance = vals.length <= 3
+                ? vals[vals.length - 1]
+                : (vals.filter(n => n < threshold).slice(-1)[0] ?? vals[vals.length - 1]);
+            if (!isNaN(balance)) txList.push({ date, balance });
+            console.log(`Danamon ${isUSD?'USD':'IDR'} tx: ${toLocalDateStr(date)} bal=${balance}`);
         }
+        if (saldoAwal !== null)
+            txList.unshift({ date: new Date(periodYear, periodMonth - 1, 1), balance: saldoAwal });
+        txList.sort((a, b) => a.date - b.date);
+        return txList;
     }
 
-    if (saldoAwal === null && transactions.length === 0)
-        throw new Error('Data transaksi IDR tidak ditemukan dalam PDF Danamon. Pastikan format PDF benar.');
+    // ── Parse section IDR (903...0747) ────────────────────────────────────────
+    // Stop saat masuk DANAMON LEBIH PRO (USD) ATAU PRIMADOLLAR
+    const txIDR = parseSection(
+        /DANAMON LEBIH PRO \(IDR\)\s*-\s*IDR\s*-/i,
+        /DANAMON LEBIH PRO \(USD\)\s*-\s*USD\s*-|PRIMADOLLAR[^(]*-\s*USD\s*-|D-POINT BANKING|AKHIR LAPORAN/i,
+        false
+    );
 
-    // Tambahkan saldo awal sebagai titik awal periode bulan ini
-    if (saldoAwal !== null) {
-        const openDate = new Date(periodYear, periodMonth - 1, 1);
-        transactions.unshift({ date: openDate, balance: saldoAwal });
-    }
+    // ── Parse section USD sub-account (903...0747) ────────────────────────────
+    // Hadir mulai Sept 2025; tidak ada = saldo nol, filter .length > 0 di akhir
+    // Stop saat masuk PRIMADOLLAR
+    const txDanaUSD_raw = parseSection(
+        /DANAMON LEBIH PRO \(USD\)\s*-\s*USD\s*-/i,
+        /PRIMADOLLAR[^(]*-\s*USD\s*-|D-POINT BANKING|AKHIR LAPORAN/i,
+        true
+    );
+    const txDanaUSD_idr = txDanaUSD_raw.map(t => ({ date: t.date, balance: t.balance * kursImplisit }));
 
-    transactions.sort((a, b) => a.date - b.date);
-    console.log(`Danamon parser: ${transactions.length} titik saldo untuk periode ${periodMonth}/${periodYear}`);
+    // ── Parse section PRIMADOLLAR (003...5703) ────────────────────────────────
+    // Stop hanya di D-POINT / AKHIR LAPORAN (rekening terakhir dalam PDF)
+    const txPrima_raw = parseSection(
+        /PRIMADOLLAR[^(]*-\s*USD\s*-/i,
+        /D-POINT BANKING|AKHIR LAPORAN/i,
+        true
+    );
+    const txPrima_idr = txPrima_raw.map(t => ({ date: t.date, balance: t.balance * kursImplisit }));
 
-    // Ambil nomor rekening IDR dari header section RINCIAN
-    let accountId = null;
+    if (txIDR.length === 0 && txDanaUSD_idr.length === 0 && txPrima_idr.length === 0)
+        throw new Error('Data transaksi tidak ditemukan dalam PDF Danamon.');
+
+    // Nomor rekening IDR
+    let accountIdIDR = null;
     for (const line of lines) {
         const m = line.match(/DANAMON LEBIH PRO \(IDR\)\s*-\s*IDR\s*-\s*(\d{6,})/i);
-        if (m) { accountId = m[1]; break; }
+        if (m) { accountIdIDR = m[1]; break; }
     }
-    console.log('Danamon accountId:', accountId);
-    return { transactions, accountId };
+
+    console.log(`Danamon: IDR(${accountIdIDR})=${txIDR.length}tx, USD-0747=${txDanaUSD_idr.length}tx, PRIMA(${accountIdUSD})=${txPrima_idr.length}tx, kurs=${kursImplisit.toFixed(2)}`);
+
+    return [
+        {
+            accountId: accountIdIDR,
+            key: accountIdIDR,
+            label: `DANAMON-${(accountIdIDR||'IDR').slice(-4)}`,
+            transactions: txIDR
+        },
+        {
+            accountId: accountIdIDR,
+            key: `${accountIdIDR}_USD`,
+            label: `DANAMON-${(accountIdIDR||'USD').slice(-4)}U`,  // e.g. DANAMON-0747U
+            transactions: txDanaUSD_idr
+        },
+        {
+            accountId: accountIdUSD,
+            key: accountIdUSD,
+            label: `DANAMON-${(accountIdUSD||'PRIMA').slice(-4)}`, // e.g. DANAMON-5703
+            transactions: txPrima_idr
+        },
+    ].filter(a => a.transactions.length > 0);
 }
 
 
@@ -652,9 +667,10 @@ async function processAllFiles() {
                 f.bank = detectedBank !== 'unknown' ? detectedBank : (f.bank || 'unknown');
 
                 if (f.bank === 'danamon') {
-                    const result = parseDanamonPDF(lines);
-                    f.transactions = result.transactions;
-                    f.accountId = result.accountId;
+                    const accounts = parseDanamonPDF(lines); // array [{accountId, label, transactions}]
+                    f.accounts    = accounts;
+                    f.transactions = accounts.flatMap(a => a.transactions); // agar validasi "ada data" lolos
+                    f.accountId   = accounts[0]?.accountId ?? null;
                 } else {
                     f.error = `PDF bank "${f.bank || 'tidak dikenal'}" belum didukung. Tersedia: Danamon.`;
                 }
@@ -709,11 +725,20 @@ function renderFileList() {
     uploadedFiles.forEach((f) => {
         const div = document.createElement('div');
         div.className = 'file-item';
-        const rekLabel = f.accountId ? ` [${f.accountId}]` : '';
+        let rekLabel = '';
+        if (f.accounts && f.accounts.length > 0) {
+            rekLabel = ' [' + f.accounts.map(a => a.label).join(', ') + ']';
+        } else if (f.accountId) {
+            const bankName = (f.bank || 'rek').toUpperCase();
+            rekLabel = ` [${bankName}-${f.accountId.slice(-4)}]`;
+        }
+        const txCount = f.accounts
+            ? f.accounts.reduce((s, a) => s + a.transactions.length, 0)
+            : (f.transactions?.length ?? 0);
         div.innerHTML = `
             <span class="bank">${(f.bank || 'Deteksi...').toUpperCase()}${rekLabel} — ${f.file.name}</span>
             <span class="status ${f.error ? 'error' : ''}">
-                ${f.error ? `❌ ${f.error}` : (f.transactions ? `✅ ${f.transactions.length} tx` : '⏳')}
+                ${f.error ? `❌ ${f.error}` : (f.transactions ? `✅ ${txCount} tx` : '⏳')}
             </span>
         `;
         fileListDiv.appendChild(div);
@@ -857,18 +882,33 @@ function calculateZakat() {
         return;
     }
 
-    // Kelompokkan per rekening (accountId) agar beberapa PDF bulanan rekening yang sama
-    // digabung sebagai satu kolom, bukan dijumlah
+    // Kumpulkan semua "rekening" dari semua file
+    // File Danamon: punya f.accounts = [{accountId, label, transactions}, ...]
+    // File lain (Mandiri, dll): satu rekening per file
+    const allAccounts = []; // [{key, label, transactions}]
+    for (const f of allFiles) {
+        if (f.accounts && f.accounts.length > 0) {
+            for (const acc of f.accounts) {
+                allAccounts.push({
+                    key: acc.key || acc.accountId || `${f.bank}_${allAccounts.length}`,
+                    label: acc.label,
+                    transactions: acc.transactions,
+                });
+            }
+        } else {
+            // Mandiri dll: satu rekening per file
+            const bankName = (f.bank || 'rek').toUpperCase();
+            const key = f.accountId || `${f.bank || 'unknown'}_${allAccounts.length}`;
+            const label = f.accountId ? `${bankName}-${f.accountId.slice(-4)}` : bankName;
+            allAccounts.push({ key, label, transactions: f.transactions });
+        }
+    }
+
+    // Gabungkan transaksi yang punya accountId sama (misal beberapa PDF bulanan rekening yang sama)
     const bankGroups = new Map(); // key → { label, txList }
-    for (let f of allFiles) {
-        // Gunakan accountId sebagai key utama; fallback ke bank+index jika tidak tersedia
-        const key = f.accountId || `${f.bank || 'unknown'}_${allFiles.indexOf(f)}`;
-        const bankName = (f.bank || 'rek').toUpperCase();
-        const label = f.accountId
-            ? `${bankName}-${f.accountId.slice(-4)}`   // contoh: MANDIRI-0025
-            : bankName;
-        if (!bankGroups.has(key)) bankGroups.set(key, { label, txList: [] });
-        bankGroups.get(key).txList.push(...f.transactions);
+    for (const acc of allAccounts) {
+        if (!bankGroups.has(acc.key)) bankGroups.set(acc.key, { label: acc.label, txList: [] });
+        bankGroups.get(acc.key).txList.push(...acc.transactions);
     }
 
     const dailyMaps = [];
@@ -897,12 +937,21 @@ function calculateZakat() {
 
     const nisab = 85 * goldPrice;
     const wajib = minBalance >= nisab;
-    const zakat = wajib ? minBalance * 0.025 : 0;
+	let zakat = wajib ? minBalance * 0.025 : 0;
+
+	// pembulatan ke atas dalam ribuan
+	if (zakat > 0) {
+		zakat = Math.ceil(zakat / 1000) * 1000;
+	}
 
     minBalanceSpan.innerText = formatRupiah(minBalance);
     nisabSpan.innerText = formatRupiah(nisab);
     statusSpan.innerText = wajib ? 'Wajib Zakat' : 'Tidak Wajib Zakat';
     zakatSpan.innerText = formatRupiah(zakat);
+	const zakatNote = document.getElementById('zakat_note');
+	if (zakatNote && zakat > 0) {
+		zakatNote.innerText = '(dibulatkan ke atas ke ribuan)';
+	}
     const minDateSpan = document.getElementById('min_balance_date');
     if (minDateSpan && minDate) {
         const [y, m, d] = minDate.split('-');
@@ -1115,6 +1164,16 @@ document.addEventListener('DOMContentLoaded', function() {
     // Tombol download
     const downloadBtn = document.getElementById('downloadCsv');
     if (downloadBtn) downloadBtn.addEventListener('click', downloadCSV);
+	
+	const copyBtn = document.getElementById('copyZakat');
+	if(copyBtn){
+		copyBtn.addEventListener('click', copyZakatValue);
+	}
+
+	const pdfBtn = document.getElementById('exportPdf');
+	if(pdfBtn){
+		pdfBtn.addEventListener('click', exportZakatPDF);
+	}
 
     // Tampilkan harga emas terkini
     const currentGoldDisplay = document.getElementById('currentGoldDisplay');
@@ -1232,3 +1291,107 @@ document.addEventListener('DOMContentLoaded', function() {
     const saved = loadFromStorage();
     if (saved) restoreSavedResult(saved);
 });
+
+async function copyZakatValue() {
+
+    const zakatText = document.getElementById('zakat').innerText;
+
+    try {
+
+        await navigator.clipboard.writeText(zakatText);
+
+        alert('Nilai zakat berhasil disalin:\nRp ' + zakatText);
+
+    } catch (err) {
+
+        alert('Gagal menyalin nilai zakat');
+
+    }
+}
+
+function exportZakatPDF() {
+
+    const { jsPDF } = window.jspdf;
+
+    const doc = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4"
+    });
+
+    const periodeStart = document.getElementById('periode_start').innerText;
+    const periodeEnd = document.getElementById('periode_end').innerText;
+
+    const saldoMin = document.getElementById('min_balance').innerText;
+    const saldoDate = document.getElementById('min_balance_date').innerText;
+
+    const nisab = document.getElementById('nisab').innerText;
+    const status = document.getElementById('status').innerText;
+    const zakat = document.getElementById('zakat').innerText;
+
+    let y = 20;
+
+    doc.setFontSize(16);
+    doc.text("Laporan Perhitungan Zakat Mal", 20, y);
+
+    y += 10;
+
+    doc.setFontSize(11);
+
+    doc.text(`Periode: ${periodeStart} s.d. ${periodeEnd}`, 20, y);
+    y += 8;
+
+    doc.text(`Saldo terendah: Rp ${saldoMin} ${saldoDate}`, 20, y);
+    y += 8;
+
+    doc.text(`Nisab: Rp ${nisab}`, 20, y);
+    y += 8;
+
+    doc.text(`Status: ${status}`, 20, y);
+    y += 8;
+
+    doc.text(`Zakat: Rp ${zakat} (dibulatkan ke atas)`, 20, y);
+
+    y += 12;
+
+    // ambil grafik dari canvas
+    const canvas = document.getElementById("balanceChart");
+
+    if (canvas) {
+
+        const imgData = canvas.toDataURL("image/png");
+
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const chartWidth = pageWidth - 40;
+        const chartHeight = chartWidth * 0.5;
+
+        doc.addImage(
+            imgData,
+            "PNG",
+            20,
+            y,
+            chartWidth,
+            chartHeight
+        );
+
+        y += chartHeight + 10;
+    }
+
+    doc.setFontSize(9);
+
+    doc.text(
+        "Grafik menunjukkan perubahan saldo harian selama periode perhitungan zakat.",
+        20,
+        y
+    );
+
+    y += 6;
+
+    doc.text(
+        "Laporan dibuat otomatis oleh Kalkulator Zakat.",
+        20,
+        y
+    );
+
+    doc.save("laporan_zakat.pdf");
+}

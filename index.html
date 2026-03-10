@@ -15,6 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- chartjs-plugin-annotation untuk label saldo terendah -->
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -84,7 +85,16 @@
             <p><strong>Total saldo terendah selama periode:</strong> Rp <span id="min_balance"></span> <span id="min_balance_date" class="min-date"></span></p>
             <p><strong>Nisab (85 gram emas):</strong> Rp <span id="nisab"></span></p>
             <p><strong>Status:</strong> <span id="status"></span></p>
-            <p><strong>Zakat yang harus dibayar:</strong> Rp <span id="zakat"></span></p>
+            <p>
+			<strong>Zakat yang harus dibayar:</strong> 
+			Rp <span id="zakat"></span> 
+			<span id="zakat_note" style="font-size:0.85em;color:#666;"></span>
+			</p>
+
+			<div style="margin-top:10px">
+			<button type="button" id="copyZakat" class="btn-small">📋 Salin Nilai Zakat</button>
+			<button type="button" id="exportPdf" class="btn-small">📄 Export Laporan PDF</button>
+			</div>
             <div class="chart-wrapper">
                 <canvas id="balanceChart"></canvas>
             </div>
