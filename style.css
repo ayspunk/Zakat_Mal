@@ -106,3 +106,86 @@ button:hover {
     background: #f2dede;
     border: 1px solid #a94442;
 }
+
+.recommendation {
+    color: #666;
+    font-size: 0.9em;
+    margin-top: 5px;
+    display: block;
+}
+#viewGoldPrice {
+    color: #0066cc;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.btn-small {
+    background: #6c757d;
+    padding: 5px 10px;
+    font-size: 0.9em;
+}
+.current-price-info {
+    background-color: #e7f3ff;
+    border-left: 4px solid #2196F3;
+    padding: 10px;
+    margin-top: 10px;
+    border-radius: 4px;
+}
+.current-price-info p {
+    margin: 0 0 5px 0;
+}
+.current-price-info button {
+    background-color: #2196F3;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+    margin-left: 10px;
+}
+.current-price-info button:hover {
+    background-color: #0b7dda;
+}
+.chart-wrapper {
+    margin-top: 20px;
+    position: relative;
+    height: 300px;
+}
+.min-date {
+    font-size: 0.88em;
+    color: #e74c3c;
+    font-weight: normal;
+    margin-left: 6px;
+}
+
+.saved-info {
+    margin-top: 16px;
+    padding: 10px 14px;
+    background: #e8f4fd;
+    border: 1px solid #b8d9f0;
+    border-radius: 5px;
+    font-size: 0.92em;
+    color: #2c5f8a;
+}
+.btn-danger {
+    background: #c0392b;
+    margin-left: 10px;
+}
+.btn-danger:hover {
+    background: #96281b;
+}
+
+.download-section {
+    margin-top: 20px;
+    text-align: center;
+}
+.btn-download {
+    background: #27ae60;
+    padding: 10px 20px;
+    font-size: 1em;
+    border-radius: 4px;
+}
+.btn-download:hover {
+    background: #2ecc71;
+}
+

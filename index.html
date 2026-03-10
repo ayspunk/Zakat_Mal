@@ -5,8 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kalkulator Zakat Mal (Client‑Side)</title>
     <link rel="stylesheet" href="style.css">
-    <!-- SheetJS untuk baca Excel -->
+    <!-- PDF.js untuk baca e-statement PDF (Danamon, dll) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- SheetJS untuk baca Excel (alternatif) tapi kita akan pakai exceljs -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <!-- ExcelJS untuk dukungan password -->
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+    <!-- Chart.js untuk grafik saldo -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- chartjs-plugin-annotation untuk label saldo terendah -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -17,7 +25,7 @@
             <div class="form-group">
                 <label for="files">Unggah file e‑statement (CSV, Excel, PDF):</label>
                 <input type="file" id="files" name="files" multiple accept=".csv,.xls,.xlsx,.pdf" required>
-                <small>File PDF yang dilindungi password akan dimintai password nanti.</small>
+                <small>PDF Danamon didukung langsung. Excel Mandiri/BCA/BNI/BRI tidak perlu password khusus. Upload beberapa file sekaligus untuk multi-rekening atau multi-bulan.</small>
             </div>
 
             <div id="fileList" class="file-list"></div>
@@ -25,15 +33,34 @@
             <div class="form-group">
                 <label for="start_date">Tanggal Mulai (1 Ramadhan tahun lalu):</label>
                 <input type="date" id="start_date" name="start_date" required>
+                <small class="recommendation">
+                    📅 Contoh: 1 Ramadhan 1446 H (versi Pemerintah RI) jatuh pada <strong><span id="recommendedStartText">1 Maret 2025</span></strong>.
+                    <button type="button" id="useStartDate" class="btn-small">Gunakan tanggal ini</button>
+                    Cek tanggal resmi di <a href="https://bimasislam.kemenag.go.id/tanggal" target="_blank">Kemenag RI</a>.
+                </small>
             </div>
             <div class="form-group">
                 <label for="end_date">Tanggal Akhir (1 Ramadhan tahun ini):</label>
                 <input type="date" id="end_date" name="end_date" required>
+                <small class="recommendation">
+                    📅 Contoh: 1 Ramadhan 1447 H diperkirakan sekitar <strong><span id="recommendedEndText">18 Februari 2026</span></strong>.
+                    <button type="button" id="useEndDate" class="btn-small">Gunakan tanggal ini</button>
+                    Pastikan dengan pengumuman resmi dari pemerintah.
+                </small>
             </div>
             <div class="form-group">
                 <label for="gold_price">Harga Emas per Gram (Rp):</label>
-                <input type="number" id="gold_price" name="gold_price" step="1000" required>
-                <small>Nisab = 85 gram emas</small>
+                <input type="text" id="gold_price" name="gold_price" placeholder="Contoh: 2780420 atau 2.780.420" required>
+                <small>Kunjungi <a href="#" id="viewGoldPrice">harga-emas.org</a> untuk harga terkini. Gunakan titik sebagai pemisah ribuan.</small>
+                
+                <!-- Informasi harga terkini -->
+                <div class="current-price-info">
+                    <p>💡 Harga emas terkini (09 Maret 2026): 
+                    <strong>Rp<span id="currentGoldDisplay"></span></strong> per gram 
+                    <button type="button" id="useCurrentPrice" class="btn-small">Gunakan harga ini</button>
+                    </p>
+                    <small>Harga dapat berubah, silakan cek kembali di website.</small>
+                </div>
             </div>
 
             <button type="button" id="calculateBtn">Hitung Zakat</button>
@@ -49,12 +76,21 @@
             </div>
         </div>
 
+        <div id="savedDataInfo" class="saved-info" style="display:none;"></div>
+
         <div id="result" class="result" style="display: none;">
             <h2>Hasil Perhitungan</h2>
-            <p><strong>Total saldo terendah selama periode:</strong> Rp <span id="min_balance"></span></p>
+            <p><strong>Periode:</strong> <span id="periode_start"></span> s.d. <span id="periode_end"></span></p>
+            <p><strong>Total saldo terendah selama periode:</strong> Rp <span id="min_balance"></span> <span id="min_balance_date" class="min-date"></span></p>
             <p><strong>Nisab (85 gram emas):</strong> Rp <span id="nisab"></span></p>
             <p><strong>Status:</strong> <span id="status"></span></p>
             <p><strong>Zakat yang harus dibayar:</strong> Rp <span id="zakat"></span></p>
+            <div class="chart-wrapper">
+                <canvas id="balanceChart"></canvas>
+            </div>
+            <div class="download-section">
+                <button type="button" id="downloadCsv" class="btn-download">📥 Download CSV Saldo Harian</button>
+            </div>
         </div>
         <div id="error" class="error" style="display: none;"></div>
     </div>
